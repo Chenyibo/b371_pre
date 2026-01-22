@@ -1,3 +1,9 @@
+#pragma once
+#include <stdint.h>
+
+#ifndef REGISTER_NUM
+#define REGISTER_NUM 32
+#endif
 
 ////////////////////////////////////////////////////////
 /// Struct Definitions
@@ -50,6 +56,63 @@ struct pipe_regs {
     int B;
     int ALUOut;
     int MDR;
+};
+
+struct if_id_reg {
+    int valid;
+    uint32_t instr;
+    int pc_plus4;
+};
+
+struct id_ex_reg {
+    int valid;
+    uint32_t instr;
+    int pc_plus4;
+
+    int rs;
+    int rt;
+    int rd;
+    int rs_val;
+    int rt_val;
+    int imm;
+    int opcode;
+    int funct;
+    int jump_index;
+
+    int RegWrite;
+    int MemRead;
+    int MemWrite;
+    int MemtoReg;
+    int RegDst;
+    int ALUSrc;
+    int ALUOp;
+    int Branch;
+    int Jump;
+    int is_halt;
+};
+
+struct ex_mem_reg {
+    int valid;
+    uint32_t instr;
+    int alu_result;
+    int store_data;
+    int dest_reg;
+    int RegWrite;
+    int MemRead;
+    int MemWrite;
+    int MemtoReg;
+    int is_halt;
+};
+
+struct mem_wb_reg {
+    int valid;
+    uint32_t instr;
+    int mem_data;
+    int alu_result;
+    int dest_reg;
+    int RegWrite;
+    int MemtoReg;
+    int is_halt;
 };
 
 
@@ -110,6 +173,11 @@ struct architectural_state {
     struct instr_meta IR_meta;
     struct pipe_regs curr_pipe_regs;
     struct pipe_regs next_pipe_regs;
+    struct if_id_reg if_id;
+    struct id_ex_reg id_ex;
+    struct ex_mem_reg ex_mem;
+    struct mem_wb_reg mem_wb;
+    int pipeline_stop_fetch;
     int bits_for_cache_tag;
     struct memory_stats_t mem_stats;
     int registers[REGISTER_NUM];
