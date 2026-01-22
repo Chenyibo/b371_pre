@@ -1,0 +1,13 @@
+# Build artifacts
+obj/
+mips-processor-simulator
+
+# Git
+.git/
+.gitignore
+
+# Docker files
+Dockerfile
+.dockerignore
+build_docker.sh
+run_docker.sh
