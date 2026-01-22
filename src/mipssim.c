@@ -407,6 +407,316 @@ void assign_pipeline_registers_for_the_next_cycle()
     }
 }
 
+static inline uint8_t pipeline_uses_rs(uint8_t opcode)
+{
+    switch (opcode)
+    {
+    case R_INST:
+    case LW:
+    case SW:
+    case BEQ:
+    case ADDI:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static inline uint8_t pipeline_uses_rt(uint8_t opcode)
+{
+    switch (opcode)
+    {
+    case R_INST:
+    case SW:
+    case BEQ:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static inline int32_t pipeline_wb_value(const struct mem_wb_reg *mem_wb)
+{
+    return mem_wb->mem_to_reg ? (int32_t)mem_wb->mem_data : (int32_t)mem_wb->alu_result;
+}
+
+static inline int32_t pipeline_forward_value(uint8_t reg_id,
+                                             int32_t original,
+                                             const struct ex_mem_reg *ex_mem,
+                                             const struct mem_wb_reg *mem_wb)
+{
+    if (reg_id == 0)
+        return original;
+    if (ex_mem->valid && ex_mem->reg_write && !ex_mem->mem_to_reg && ex_mem->dest_reg == reg_id)
+        return (int32_t)ex_mem->alu_result;
+    if (mem_wb->valid && mem_wb->reg_write && mem_wb->dest_reg == reg_id)
+        return pipeline_wb_value(mem_wb);
+    return original;
+}
+
+void run_pipelined_5_stage(FILE *output)
+{
+    fprintf(output, "%s,%s,%s,%s,%s,%s\n", "cycle", "pc", "IFID_IR", "IDEX_IR", "EXMEM_IR", "MEMWB_IR");
+    fflush(output);
+
+    arch_state.pipeline_pc = 0;
+    arch_state.pipeline_fetch_stopped = 0;
+    memset(&arch_state.pipeline_if_id, 0, sizeof(arch_state.pipeline_if_id));
+    memset(&arch_state.pipeline_id_ex, 0, sizeof(arch_state.pipeline_id_ex));
+    memset(&arch_state.pipeline_ex_mem, 0, sizeof(arch_state.pipeline_ex_mem));
+    memset(&arch_state.pipeline_mem_wb, 0, sizeof(arch_state.pipeline_mem_wb));
+    arch_state.clock_cycle = 0;
+
+    while (true)
+    {
+        fprintf(output, "%" PRIu64 ",%u,%u,%u,%u,%u\n",
+                arch_state.clock_cycle,
+                arch_state.pipeline_pc,
+                arch_state.pipeline_if_id.valid ? arch_state.pipeline_if_id.instr : 0,
+                arch_state.pipeline_id_ex.valid ? arch_state.pipeline_id_ex.instr : 0,
+                arch_state.pipeline_ex_mem.valid ? arch_state.pipeline_ex_mem.instr : 0,
+                arch_state.pipeline_mem_wb.valid ? arch_state.pipeline_mem_wb.instr : 0);
+        fflush(output);
+
+        struct if_id_reg next_if_id;
+        struct id_ex_reg next_id_ex;
+        struct ex_mem_reg next_ex_mem;
+        struct mem_wb_reg next_mem_wb;
+        memset(&next_if_id, 0, sizeof(next_if_id));
+        memset(&next_id_ex, 0, sizeof(next_id_ex));
+        memset(&next_ex_mem, 0, sizeof(next_ex_mem));
+        memset(&next_mem_wb, 0, sizeof(next_mem_wb));
+
+        uint32_t pc_next = arch_state.pipeline_pc;
+        uint8_t fetch_stopped_next = arch_state.pipeline_fetch_stopped;
+
+        uint8_t exit_after_wb = arch_state.pipeline_mem_wb.valid && arch_state.pipeline_mem_wb.is_eop;
+
+        if (arch_state.pipeline_mem_wb.valid && arch_state.pipeline_mem_wb.reg_write)
+        {
+            uint8_t dest = arch_state.pipeline_mem_wb.dest_reg;
+            if (dest > 0)
+                arch_state.registers[dest] = pipeline_wb_value(&arch_state.pipeline_mem_wb);
+        }
+
+        if (arch_state.pipeline_ex_mem.valid)
+        {
+            next_mem_wb.valid = 1;
+            next_mem_wb.instr = arch_state.pipeline_ex_mem.instr;
+            next_mem_wb.alu_result = arch_state.pipeline_ex_mem.alu_result;
+            next_mem_wb.dest_reg = arch_state.pipeline_ex_mem.dest_reg;
+            next_mem_wb.reg_write = arch_state.pipeline_ex_mem.reg_write;
+            next_mem_wb.mem_to_reg = arch_state.pipeline_ex_mem.mem_to_reg;
+            next_mem_wb.is_eop = arch_state.pipeline_ex_mem.is_eop;
+
+            if (arch_state.pipeline_ex_mem.mem_read)
+                next_mem_wb.mem_data = (uint32_t)memory_read((int)arch_state.pipeline_ex_mem.alu_result);
+            if (arch_state.pipeline_ex_mem.mem_write)
+                memory_write((int)arch_state.pipeline_ex_mem.alu_result, (int)arch_state.pipeline_ex_mem.rt_forward_val);
+        }
+
+        uint8_t pc_redirect = 0;
+        uint32_t pc_redirect_value = 0;
+
+        if (arch_state.pipeline_id_ex.valid)
+        {
+            int32_t rs_val = pipeline_forward_value(arch_state.pipeline_id_ex.rs,
+                                                    arch_state.pipeline_id_ex.rs_val,
+                                                    &arch_state.pipeline_ex_mem,
+                                                    &arch_state.pipeline_mem_wb);
+            int32_t rt_val = pipeline_forward_value(arch_state.pipeline_id_ex.rt,
+                                                    arch_state.pipeline_id_ex.rt_val,
+                                                    &arch_state.pipeline_ex_mem,
+                                                    &arch_state.pipeline_mem_wb);
+
+            if (arch_state.pipeline_id_ex.is_branch)
+            {
+                if (rs_val == rt_val)
+                {
+                    pc_redirect = 1;
+                    pc_redirect_value = arch_state.pipeline_id_ex.pc_plus4 + ((uint32_t)arch_state.pipeline_id_ex.imm << 2);
+                }
+            }
+            else if (!arch_state.pipeline_id_ex.is_eop)
+            {
+                next_ex_mem.valid = 1;
+                next_ex_mem.instr = arch_state.pipeline_id_ex.instr;
+                next_ex_mem.reg_write = arch_state.pipeline_id_ex.reg_write;
+                next_ex_mem.mem_read = arch_state.pipeline_id_ex.mem_read;
+                next_ex_mem.mem_write = arch_state.pipeline_id_ex.mem_write;
+                next_ex_mem.mem_to_reg = arch_state.pipeline_id_ex.mem_to_reg;
+                next_ex_mem.is_eop = 0;
+
+                uint8_t dest_reg = arch_state.pipeline_id_ex.reg_dst ? arch_state.pipeline_id_ex.rd : arch_state.pipeline_id_ex.rt;
+                next_ex_mem.dest_reg = dest_reg;
+                next_ex_mem.rt_forward_val = (uint32_t)rt_val;
+
+                uint32_t alu_result = 0;
+                if (arch_state.pipeline_id_ex.opcode == R_INST)
+                {
+                    if (arch_state.pipeline_id_ex.funct == ADD)
+                        alu_result = (uint32_t)(rs_val + rt_val);
+                    else if (arch_state.pipeline_id_ex.funct == SLT)
+                        alu_result = (uint32_t)(rs_val < rt_val ? 1 : 0);
+                    else
+                        assert(false && "Unsupported R-type funct");
+                }
+                else if (arch_state.pipeline_id_ex.opcode == ADDI)
+                {
+                    alu_result = (uint32_t)(rs_val + arch_state.pipeline_id_ex.imm);
+                }
+                else if (arch_state.pipeline_id_ex.opcode == LW || arch_state.pipeline_id_ex.opcode == SW)
+                {
+                    alu_result = (uint32_t)(rs_val + arch_state.pipeline_id_ex.imm);
+                }
+                else
+                {
+                    assert(false && "Unsupported opcode in EX");
+                }
+
+                next_ex_mem.alu_result = alu_result;
+            }
+            else
+            {
+                next_ex_mem.valid = 1;
+                next_ex_mem.instr = arch_state.pipeline_id_ex.instr;
+                next_ex_mem.reg_write = 0;
+                next_ex_mem.mem_read = 0;
+                next_ex_mem.mem_write = 0;
+                next_ex_mem.mem_to_reg = 0;
+                next_ex_mem.dest_reg = 0;
+                next_ex_mem.alu_result = 0;
+                next_ex_mem.rt_forward_val = 0;
+                next_ex_mem.is_eop = 1;
+            }
+        }
+
+        uint8_t stall = 0;
+        if (!pc_redirect && arch_state.pipeline_if_id.valid && arch_state.pipeline_id_ex.valid && arch_state.pipeline_id_ex.mem_read)
+        {
+            uint32_t if_instr = arch_state.pipeline_if_id.instr;
+            uint8_t if_opcode = (uint8_t)get_piece_of_a_word((int)if_instr, OPCODE_OFFSET, OPCODE_SIZE);
+            uint8_t if_rs = (uint8_t)get_piece_of_a_word((int)if_instr, 21, REGISTER_ID_SIZE);
+            uint8_t if_rt = (uint8_t)get_piece_of_a_word((int)if_instr, 16, REGISTER_ID_SIZE);
+            uint8_t load_dest = arch_state.pipeline_id_ex.rt;
+
+            uint8_t hazard_rs = pipeline_uses_rs(if_opcode) && (if_rs == load_dest) && (load_dest != 0);
+            uint8_t hazard_rt = pipeline_uses_rt(if_opcode) && (if_rt == load_dest) && (load_dest != 0);
+            if (hazard_rs || hazard_rt)
+                stall = 1;
+        }
+
+        uint8_t jump_redirect = 0;
+        uint32_t jump_target = 0;
+        if (!pc_redirect && !stall && arch_state.pipeline_if_id.valid)
+        {
+            uint32_t if_instr = arch_state.pipeline_if_id.instr;
+            uint8_t if_opcode = (uint8_t)get_piece_of_a_word((int)if_instr, OPCODE_OFFSET, OPCODE_SIZE);
+            if (if_opcode == J)
+            {
+                uint32_t jmp_offset = (uint32_t)get_piece_of_a_word((int)if_instr, 0, 26);
+                jump_redirect = 1;
+                jump_target = (arch_state.pipeline_if_id.pc_plus4 & 0xF0000000u) | (jmp_offset << 2);
+            }
+        }
+
+        if (pc_redirect || jump_redirect)
+        {
+            next_id_ex.valid = 0;
+        }
+        else if (stall)
+        {
+            next_id_ex.valid = 0;
+        }
+        else if (arch_state.pipeline_if_id.valid)
+        {
+            uint32_t instr = arch_state.pipeline_if_id.instr;
+            uint8_t opcode = (uint8_t)get_piece_of_a_word((int)instr, OPCODE_OFFSET, OPCODE_SIZE);
+            uint8_t rs = (uint8_t)get_piece_of_a_word((int)instr, 21, REGISTER_ID_SIZE);
+            uint8_t rt = (uint8_t)get_piece_of_a_word((int)instr, 16, REGISTER_ID_SIZE);
+            uint8_t rd = (uint8_t)get_piece_of_a_word((int)instr, 11, REGISTER_ID_SIZE);
+            uint8_t funct = (uint8_t)get_piece_of_a_word((int)instr, 0, 6);
+
+            next_id_ex.valid = 1;
+            next_id_ex.instr = instr;
+            next_id_ex.opcode = opcode;
+            next_id_ex.rs = rs;
+            next_id_ex.rt = rt;
+            next_id_ex.rd = rd;
+            next_id_ex.funct = funct;
+            next_id_ex.type = get_instruction_type(opcode);
+            next_id_ex.imm = (int32_t)get_sign_extended_imm_id((int)instr, IMMEDIATE_OFFSET);
+            next_id_ex.pc_plus4 = arch_state.pipeline_if_id.pc_plus4;
+            next_id_ex.rs_val = arch_state.registers[rs];
+            next_id_ex.rt_val = arch_state.registers[rt];
+
+            next_id_ex.is_eop = (opcode == EOP) ? 1 : 0;
+            if (!next_id_ex.is_eop)
+            {
+                next_id_ex.is_branch = (opcode == BEQ) ? 1 : 0;
+                next_id_ex.mem_read = (opcode == LW) ? 1 : 0;
+                next_id_ex.mem_write = (opcode == SW) ? 1 : 0;
+                next_id_ex.mem_to_reg = (opcode == LW) ? 1 : 0;
+                next_id_ex.reg_write = (opcode == LW || opcode == ADDI || opcode == R_INST) ? 1 : 0;
+                next_id_ex.alu_src_imm = (opcode == LW || opcode == SW || opcode == ADDI) ? 1 : 0;
+                next_id_ex.reg_dst = (opcode == R_INST) ? 1 : 0;
+
+                if (opcode == R_INST && funct != ADD && funct != SLT)
+                    assert(false && "Unsupported R-type funct");
+            }
+        }
+
+        if (pc_redirect)
+        {
+            pc_next = pc_redirect_value;
+            next_if_id.valid = 0;
+        }
+        else if (jump_redirect)
+        {
+            pc_next = jump_target;
+            next_if_id.valid = 0;
+        }
+        else if (stall)
+        {
+            next_if_id = arch_state.pipeline_if_id;
+            pc_next = arch_state.pipeline_pc;
+        }
+        else if (arch_state.pipeline_fetch_stopped)
+        {
+            next_if_id.valid = 0;
+            pc_next = arch_state.pipeline_pc;
+        }
+        else
+        {
+            uint32_t instr = (uint32_t)memory_read((int)arch_state.pipeline_pc);
+            next_if_id.valid = 1;
+            next_if_id.instr = instr;
+            next_if_id.pc = arch_state.pipeline_pc;
+            next_if_id.pc_plus4 = arch_state.pipeline_pc + 4;
+            pc_next = arch_state.pipeline_pc + 4;
+
+            uint8_t opcode = (uint8_t)get_piece_of_a_word((int)instr, OPCODE_OFFSET, OPCODE_SIZE);
+            if (opcode == EOP)
+                fetch_stopped_next = 1;
+        }
+
+        arch_state.pipeline_pc = pc_next;
+        arch_state.pipeline_fetch_stopped = fetch_stopped_next;
+        arch_state.pipeline_if_id = next_if_id;
+        arch_state.pipeline_id_ex = next_id_ex;
+        arch_state.pipeline_ex_mem = next_ex_mem;
+        arch_state.pipeline_mem_wb = next_mem_wb;
+        arch_state.registers[0] = 0;
+
+        arch_state.clock_cycle++;
+
+        if (exit_after_wb)
+            break;
+        if (arch_state.clock_cycle == (uint64_t)BREAK_POINT)
+            break;
+    }
+}
+
 int main(int argc, const char *argv[])
 {
     /*--------------------------------------
@@ -432,6 +742,9 @@ int main(int argc, const char *argv[])
         break;
     case (FULL):
         task_5();
+        break;
+    case (PIPELINED_5_STAGE):
+        task_6();
         break;
     default:
         assert(false && "No task given");

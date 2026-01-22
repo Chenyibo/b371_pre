@@ -10,7 +10,11 @@
 #include <stdio.h>
 #include <stdbool.h>
 
-size_t getline(char ** restrict linep, size_t * restrict linecapp, FILE * restrict stream);
+#ifdef __cplusplus
+#ifndef restrict
+#define restrict
+#endif
+#endif
 
 #define WORD_SIZE 4 // Bytes
 #define REGISTER_NUM 32

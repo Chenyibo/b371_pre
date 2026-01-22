@@ -1,3 +1,9 @@
+#pragma once
+#include <stdint.h>
+
+#ifndef REGISTER_NUM
+#define REGISTER_NUM 32
+#endif
 
 ////////////////////////////////////////////////////////
 /// Struct Definitions
@@ -50,6 +56,63 @@ struct pipe_regs {
     int B;
     int ALUOut;
     int MDR;
+};
+
+struct if_id_reg {
+    uint8_t valid;
+    uint32_t pc;
+    uint32_t pc_plus4;
+    uint32_t instr;
+};
+
+struct id_ex_reg {
+    uint8_t valid;
+    uint32_t instr;
+    uint32_t pc_plus4;
+    int32_t rs_val;
+    int32_t rt_val;
+    int32_t imm;
+    uint8_t rs;
+    uint8_t rt;
+    uint8_t rd;
+    uint8_t opcode;
+    uint8_t funct;
+    uint8_t type;
+
+    uint8_t reg_write;
+    uint8_t mem_read;
+    uint8_t mem_write;
+    uint8_t mem_to_reg;
+    uint8_t alu_src_imm;
+    uint8_t reg_dst;
+    uint8_t is_branch;
+    uint8_t is_eop;
+};
+
+struct ex_mem_reg {
+    uint8_t valid;
+    uint32_t instr;
+    uint32_t alu_result;
+    uint32_t rt_forward_val;
+    uint8_t dest_reg;
+
+    uint8_t reg_write;
+    uint8_t mem_read;
+    uint8_t mem_write;
+    uint8_t mem_to_reg;
+    uint8_t is_eop;
+};
+
+struct mem_wb_reg {
+    uint8_t valid;
+    uint32_t instr;
+    uint32_t mem_data;
+    uint32_t alu_result;
+    uint8_t dest_reg;
+
+    uint8_t reg_write;
+    uint8_t mem_to_reg;
+    uint8_t is_eop;
 };
 
 
@@ -110,6 +173,12 @@ struct architectural_state {
     struct instr_meta IR_meta;
     struct pipe_regs curr_pipe_regs;
     struct pipe_regs next_pipe_regs;
+    uint32_t pipeline_pc;
+    uint8_t pipeline_fetch_stopped;
+    struct if_id_reg pipeline_if_id;
+    struct id_ex_reg pipeline_id_ex;
+    struct ex_mem_reg pipeline_ex_mem;
+    struct mem_wb_reg pipeline_mem_wb;
     int bits_for_cache_tag;
     struct memory_stats_t mem_stats;
     int registers[REGISTER_NUM];
