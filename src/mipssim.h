@@ -12,6 +12,7 @@
 #define FINITE_STATE_MACHINE 3
 #define FINITE_STATE_MACHINE_EXT 4
 #define FULL 5
+#define PIPELINED_5_STAGE 6
 
 
 ////////////////////////////////////////////////////////
@@ -34,6 +35,7 @@ void execute();
 void memory_access();
 void write_back();
 void assign_pipeline_registers_for_the_next_cycle();
+void task_6_pipeline();
 
 
 ////////////////////////////////////////////////////////
@@ -101,7 +103,7 @@ static inline int get_piece_of_a_word(int word, uint8_t start, uint8_t size)
 static inline void parse_arguments(int argc, const char* argv[])
 {
     assert(argc == 4 && "Three arguments are expected in the following order: " &&
-           "1. <task_number> (1 -> instruction_type, 2 -> fsm_decode, 3 -> fsm, 4 -> fsm_ext, 5 -> full)" &&
+           "1. <task_number> (1 -> instruction_type, 2 -> fsm_decode, 3 -> fsm, 4 -> fsm_ext, 5 -> full, 6 -> pipeline_5_stage)" &&
            "2. <init_memory_file_path>" &&
            "3. <init_register_file_path>");
     sscanf(argv[1],"%d", &task_number); 

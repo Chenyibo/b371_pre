@@ -433,7 +433,300 @@ int main(int argc, const char *argv[])
     case (FULL):
         task_5();
         break;
+    case (PIPELINED_5_STAGE):
+        task_6_pipeline();
+        break;
     default:
         assert(false && "No task given");
     }
+}
+
+static inline void pipeline_decode(uint32_t instr, int *opcode, int *rs, int *rt, int *rd, int *funct, int *imm, int *jump_index)
+{
+    *opcode = get_piece_of_a_word(instr, OPCODE_OFFSET, OPCODE_SIZE);
+    *rs = get_piece_of_a_word(instr, 21, REGISTER_ID_SIZE);
+    *rt = get_piece_of_a_word(instr, 16, REGISTER_ID_SIZE);
+    *rd = get_piece_of_a_word(instr, 11, REGISTER_ID_SIZE);
+    *funct = get_piece_of_a_word(instr, 0, 6);
+    *imm = get_sign_extended_imm_id(instr, IMMEDIATE_OFFSET);
+    *jump_index = get_piece_of_a_word(instr, 0, 26);
+}
+
+static inline int pipeline_alu(int op, int a, int b)
+{
+    switch (op)
+    {
+    case 0:
+        return a + b;
+    case 1:
+        return a - b;
+    case 2:
+        return a < b ? 1 : 0;
+    default:
+        assert(false && "unknown ALU op");
+    }
+}
+
+static inline int pipeline_writes_reg(const struct id_ex_reg *r)
+{
+    return r->valid && r->RegWrite && !r->is_halt;
+}
+
+static inline int pipeline_reg_id_from_id_ex(const struct id_ex_reg *r)
+{
+    if (!pipeline_writes_reg(r))
+        return 0;
+    return r->RegDst ? r->rd : r->rt;
+}
+
+void task_6_pipeline()
+{
+    FILE *output = fopen("task_6.out", "w");
+    fprintf(output, "cycle,pc,if_id_valid,if_id_instr,id_ex_valid,id_ex_instr,ex_mem_valid,ex_mem_instr,mem_wb_valid,mem_wb_instr,stall,flush\n");
+    fflush(output);
+
+    arch_state.pipeline_stop_fetch = 0;
+
+    while (true)
+    {
+        int stall = 0;
+        int flush = 0;
+        int stop_fetch_next = arch_state.pipeline_stop_fetch;
+
+        if (arch_state.mem_wb.valid && arch_state.mem_wb.RegWrite && arch_state.mem_wb.dest_reg != 0 && !arch_state.mem_wb.is_halt)
+        {
+            int write_data = arch_state.mem_wb.MemtoReg ? arch_state.mem_wb.mem_data : arch_state.mem_wb.alu_result;
+            arch_state.registers[arch_state.mem_wb.dest_reg] = write_data;
+        }
+
+        struct mem_wb_reg next_mem_wb = {0};
+        if (arch_state.ex_mem.valid)
+        {
+            next_mem_wb.valid = 1;
+            next_mem_wb.instr = arch_state.ex_mem.instr;
+            next_mem_wb.dest_reg = arch_state.ex_mem.dest_reg;
+            next_mem_wb.RegWrite = arch_state.ex_mem.RegWrite;
+            next_mem_wb.MemtoReg = arch_state.ex_mem.MemtoReg;
+            next_mem_wb.alu_result = arch_state.ex_mem.alu_result;
+            next_mem_wb.is_halt = arch_state.ex_mem.is_halt;
+
+            if (arch_state.ex_mem.MemRead)
+                next_mem_wb.mem_data = memory_read(arch_state.ex_mem.alu_result);
+            if (arch_state.ex_mem.MemWrite)
+                memory_write(arch_state.ex_mem.alu_result, arch_state.ex_mem.store_data);
+        }
+
+        struct ex_mem_reg next_ex_mem = {0};
+        int redirect_pc = 0;
+        int redirect_target = 0;
+
+        if (arch_state.id_ex.valid)
+        {
+            int rs_val = arch_state.id_ex.rs_val;
+            int rt_val = arch_state.id_ex.rt_val;
+
+            if (arch_state.ex_mem.valid && arch_state.ex_mem.RegWrite && !arch_state.ex_mem.MemtoReg && arch_state.ex_mem.dest_reg != 0 && arch_state.ex_mem.dest_reg == arch_state.id_ex.rs)
+                rs_val = arch_state.ex_mem.alu_result;
+            else if (arch_state.mem_wb.valid && arch_state.mem_wb.RegWrite && arch_state.mem_wb.dest_reg != 0 && arch_state.mem_wb.dest_reg == arch_state.id_ex.rs)
+                rs_val = arch_state.mem_wb.MemtoReg ? arch_state.mem_wb.mem_data : arch_state.mem_wb.alu_result;
+
+            if (arch_state.ex_mem.valid && arch_state.ex_mem.RegWrite && !arch_state.ex_mem.MemtoReg && arch_state.ex_mem.dest_reg != 0 && arch_state.ex_mem.dest_reg == arch_state.id_ex.rt)
+                rt_val = arch_state.ex_mem.alu_result;
+            else if (arch_state.mem_wb.valid && arch_state.mem_wb.RegWrite && arch_state.mem_wb.dest_reg != 0 && arch_state.mem_wb.dest_reg == arch_state.id_ex.rt)
+                rt_val = arch_state.mem_wb.MemtoReg ? arch_state.mem_wb.mem_data : arch_state.mem_wb.alu_result;
+
+            int alu_b = arch_state.id_ex.ALUSrc ? arch_state.id_ex.imm : rt_val;
+            int alu_result = pipeline_alu(arch_state.id_ex.ALUOp, rs_val, alu_b);
+            int dest_reg = pipeline_reg_id_from_id_ex(&arch_state.id_ex);
+
+            int branch_taken = arch_state.id_ex.Branch && (rs_val == rt_val);
+            int branch_target = arch_state.id_ex.pc_plus4 + (arch_state.id_ex.imm << 2);
+            int jump_taken = arch_state.id_ex.Jump;
+            int jump_target = (arch_state.id_ex.pc_plus4 & 0xF0000000) | (arch_state.id_ex.jump_index << 2);
+
+            if (branch_taken)
+            {
+                redirect_pc = 1;
+                redirect_target = branch_target;
+                flush = 1;
+            }
+            else if (jump_taken)
+            {
+                redirect_pc = 1;
+                redirect_target = jump_target;
+                flush = 1;
+            }
+
+            next_ex_mem.valid = 1;
+            next_ex_mem.instr = arch_state.id_ex.instr;
+            next_ex_mem.alu_result = alu_result;
+            next_ex_mem.store_data = rt_val;
+            next_ex_mem.dest_reg = dest_reg;
+            next_ex_mem.RegWrite = arch_state.id_ex.RegWrite;
+            next_ex_mem.MemRead = arch_state.id_ex.MemRead;
+            next_ex_mem.MemWrite = arch_state.id_ex.MemWrite;
+            next_ex_mem.MemtoReg = arch_state.id_ex.MemtoReg;
+            next_ex_mem.is_halt = arch_state.id_ex.is_halt;
+        }
+
+        struct id_ex_reg next_id_ex = {0};
+        if (arch_state.if_id.valid)
+        {
+            int opcode = 0, rs = 0, rt = 0, rd = 0, funct = 0, imm = 0, jump_index = 0;
+            pipeline_decode(arch_state.if_id.instr, &opcode, &rs, &rt, &rd, &funct, &imm, &jump_index);
+
+            int id_uses_rs = (opcode != J) && (opcode != EOP);
+            int id_uses_rt = (opcode == R_INST) || (opcode == SW) || (opcode == BEQ);
+
+            int load_dest = pipeline_reg_id_from_id_ex(&arch_state.id_ex);
+            if (arch_state.id_ex.valid && arch_state.id_ex.MemRead && load_dest != 0)
+            {
+                if ((id_uses_rs && load_dest == rs) || (id_uses_rt && load_dest == rt))
+                    stall = 1;
+            }
+
+            if (!stall && !flush)
+            {
+                next_id_ex.valid = 1;
+                next_id_ex.instr = arch_state.if_id.instr;
+                next_id_ex.pc_plus4 = arch_state.if_id.pc_plus4;
+                next_id_ex.rs = rs;
+                next_id_ex.rt = rt;
+                next_id_ex.rd = rd;
+                next_id_ex.rs_val = arch_state.registers[rs];
+                next_id_ex.rt_val = arch_state.registers[rt];
+                next_id_ex.imm = imm;
+                next_id_ex.opcode = opcode;
+                next_id_ex.funct = funct;
+                next_id_ex.jump_index = jump_index;
+
+                if (opcode == R_INST)
+                {
+                    next_id_ex.RegWrite = 1;
+                    next_id_ex.RegDst = 1;
+                    next_id_ex.ALUSrc = 0;
+                    next_id_ex.MemtoReg = 0;
+                    if (funct == ADD)
+                        next_id_ex.ALUOp = 0;
+                    else if (funct == SLT)
+                        next_id_ex.ALUOp = 2;
+                    else
+                        assert(false && "unsupported R-type funct");
+                }
+                else if (opcode == ADDI)
+                {
+                    next_id_ex.RegWrite = 1;
+                    next_id_ex.RegDst = 0;
+                    next_id_ex.ALUSrc = 1;
+                    next_id_ex.ALUOp = 0;
+                }
+                else if (opcode == LW)
+                {
+                    next_id_ex.RegWrite = 1;
+                    next_id_ex.RegDst = 0;
+                    next_id_ex.ALUSrc = 1;
+                    next_id_ex.ALUOp = 0;
+                    next_id_ex.MemRead = 1;
+                    next_id_ex.MemtoReg = 1;
+                }
+                else if (opcode == SW)
+                {
+                    next_id_ex.RegWrite = 0;
+                    next_id_ex.RegDst = 0;
+                    next_id_ex.ALUSrc = 1;
+                    next_id_ex.ALUOp = 0;
+                    next_id_ex.MemWrite = 1;
+                }
+                else if (opcode == BEQ)
+                {
+                    next_id_ex.Branch = 1;
+                    next_id_ex.ALUSrc = 0;
+                    next_id_ex.ALUOp = 1;
+                }
+                else if (opcode == J)
+                {
+                    next_id_ex.Jump = 1;
+                }
+                else if (opcode == EOP)
+                {
+                    next_id_ex.is_halt = 1;
+                    stop_fetch_next = 1;
+                }
+                else
+                {
+                    assert(false && "unsupported opcode");
+                }
+            }
+        }
+
+        struct if_id_reg next_if_id = arch_state.if_id;
+        int next_pc = arch_state.curr_pipe_regs.pc;
+
+        if (redirect_pc)
+        {
+            next_pc = redirect_target;
+            next_if_id.valid = 0;
+        }
+        else if (!stall)
+        {
+            if (!stop_fetch_next)
+            {
+                uint32_t fetched = (uint32_t)memory_read(arch_state.curr_pipe_regs.pc);
+                next_if_id.instr = fetched;
+                next_if_id.pc_plus4 = arch_state.curr_pipe_regs.pc + 4;
+                next_if_id.valid = 1;
+                next_pc = arch_state.curr_pipe_regs.pc + 4;
+            }
+            else
+            {
+                next_if_id.valid = 0;
+            }
+        }
+
+        if (stall)
+            next_if_id = arch_state.if_id;
+
+        if (flush)
+        {
+            next_if_id.valid = 0;
+            next_id_ex.valid = 0;
+        }
+
+        fprintf(output, "%" PRIu64 ",%d,%d,%u,%d,%u,%d,%u,%d,%u,%d,%d\n",
+                arch_state.clock_cycle,
+                arch_state.curr_pipe_regs.pc,
+                arch_state.if_id.valid, arch_state.if_id.instr,
+                arch_state.id_ex.valid, arch_state.id_ex.instr,
+                arch_state.ex_mem.valid, arch_state.ex_mem.instr,
+                arch_state.mem_wb.valid, arch_state.mem_wb.instr,
+                stall, flush);
+        fflush(output);
+
+        arch_state.mem_wb = next_mem_wb;
+        arch_state.ex_mem = next_ex_mem;
+        arch_state.id_ex = next_id_ex;
+        arch_state.if_id = next_if_id;
+        arch_state.curr_pipe_regs.pc = next_pc;
+        arch_state.pipeline_stop_fetch = stop_fetch_next;
+
+        arch_state.clock_cycle++;
+
+        if (arch_state.pipeline_stop_fetch &&
+            !arch_state.if_id.valid &&
+            !arch_state.id_ex.valid &&
+            !arch_state.ex_mem.valid &&
+            !arch_state.mem_wb.valid)
+        {
+            printf("Exiting because the exit state was reached \n");
+            break;
+        }
+
+        if (arch_state.clock_cycle == BREAK_POINT)
+        {
+            printf("Exiting because the break point (%u) was reached \n", BREAK_POINT);
+            break;
+        }
+    }
+
+    fclose(output);
 }
